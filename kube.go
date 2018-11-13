@@ -141,6 +141,7 @@ func (s *endpointRefresher) ListEndpoints(namespace, service string) ([]*target,
 }
 
 func (s *Pool) refresh() error {
+	fmt.Println("refresh")
 	endpoints, err := s.refresher.ListEndpoints(s.selector.Namespace, s.selector.Service)
 	if err != nil {
 		return err
@@ -159,12 +160,8 @@ func (s *Pool) refresh() error {
 }
 
 func (s *Pool) avail() (*target, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	for k, v := range s.targets {
 		if _, ok := s.busy[k]; !ok {
-			s.busy[k] = struct{}{}
 			return v, true
 		}
 	}
@@ -173,13 +170,22 @@ func (s *Pool) avail() (*target, bool) {
 }
 
 func (s *Pool) serve() {
+	fmt.Println("serve")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	for {
+		ta, ok := s.avail()
+		if !ok {
+			return
+		}
+
+		fmt.Println("one avail")
+
 		select {
 		case next := <-s.waiting:
-			ta, ok := s.avail()
-			if !ok {
-				return
-			}
+			fmt.Println("serving to waiter")
+			s.busy[ta.key] = struct{}{}
 			next.target <- ta
 
 		default:
@@ -193,9 +199,11 @@ func (s *Pool) poll(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			fmt.Println("cancel called")
 			return
 		case <-ticker.C:
 			s.refresh()
+			s.serve()
 		}
 	}
 }
@@ -205,12 +213,17 @@ type HTTPClient interface {
 }
 
 func New(ctx context.Context, client HTTPClient, config *Config) *Pool {
+	return newBalancer(ctx, client, config, &endpointRefresher{client: client})
+}
+
+func newBalancer(ctx context.Context, client HTTPClient, config *Config, refresher Refresher) *Pool {
 	pool := &Pool{
 		client:    client,
 		interval:  config.Interval,
 		selector:  config.Selector,
 		waiting:   make(chan *pass, 128),
-		refresher: &endpointRefresher{client: client},
+		refresher: refresher,
+		busy:      map[key]struct{}{},
 	}
 
 	go pool.poll(ctx)
@@ -249,18 +262,27 @@ func (s *Pool) Do(ireq *http.Request) (*http.Response, error) {
 	p := newPass()
 	//TODO: close waiting
 	s.waiting <- p
+	fmt.Println("added to waiting")
 	pod := <-p.target
 
-	path := fmt.Sprintf("%s:%d%s", pod.ip, pod.port, ireq.URL.Path)
-	req, _ := http.NewRequest(ireq.Method, path, nil)
+	fmt.Println("got pod")
+
+	path := fmt.Sprintf("http://%s:%d%s", pod.ip, pod.port, ireq.URL.Path)
+	req, err := http.NewRequest(ireq.Method, path, nil)
+	fmt.Println(req, err)
+	if err != nil {
+		return nil, err
+	}
+
 	res, err := s.client.Do(req)
 
 	res.Body = &bodyReader{
 		rc: res.Body,
 		onclose: func() {
 			s.mu.Lock()
-			defer s.mu.Unlock()
 			delete(s.busy, pod.key)
+			s.mu.Unlock()
+			s.serve()
 		},
 	}
 

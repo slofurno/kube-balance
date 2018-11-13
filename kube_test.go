@@ -3,7 +3,10 @@ package balancer
 import (
 	"context"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 )
@@ -24,14 +27,23 @@ func (s *podRefresher) ListEndpoints(namespace, service string) ([]*target, erro
 	return ret, nil
 }
 
+type readCloser struct{}
+
+func (rc *readCloser) Read(p []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (rc *readCloser) Close() error { return nil }
+
 type printClient struct{}
 
 func (s *printClient) Do(req *http.Request) (*http.Response, error) {
 	fmt.Printf("%#v\n", req)
-	return &http.Response{}, nil
+	time.Sleep(time.Second)
+	return &http.Response{Body: &readCloser{}}, nil
 }
 
-func TestA(t *testing.T) {
+func TestBalancer(t *testing.T) {
 	refresher := &podRefresher{
 		endpoints: [][]*target{
 			[]*target{
@@ -105,16 +117,33 @@ func TestA(t *testing.T) {
 	client := &printClient{}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
-	balancer := New(ctx, client, &Config{Interval: time.Second, Selector: Selector{}})
 
+	balancer := newBalancer(ctx, client, &Config{Interval: time.Second, Selector: Selector{}}, refresher)
+
+	wait := sync.WaitGroup{}
+	wait.Add(10)
 	for i := 0; i < 10; i++ {
 		go func() {
-			res, err := balancer.Do(http.NewRequest("GET", "/test", nil))
+			fmt.Println("starting...")
+			req, err := http.NewRequest("GET", "/test", nil)
 			if err != nil {
-				t.Error(err)
+				t.Fatal(err)
 			}
+			res, err := balancer.Do(req)
+			if err != nil {
+				fmt.Println(err)
+				t.Fatal(err)
+			}
+
 			defer res.Body.Close()
+			_, err = ioutil.ReadAll(res.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			wait.Done()
 		}()
 	}
 
+	wait.Wait()
 }
