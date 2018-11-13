@@ -34,10 +34,12 @@ func (rc *readCloser) Read(p []byte) (int, error) {
 
 func (rc *readCloser) Close() error { return nil }
 
-type printClient struct{}
+type printClient struct {
+	delay time.Duration
+}
 
 func (s *printClient) Do(req *http.Request) (*http.Response, error) {
-	time.Sleep(time.Millisecond * 24)
+	time.Sleep(s.delay)
 	return &http.Response{Body: &readCloser{}}, nil
 }
 
@@ -112,51 +114,65 @@ func TestBalancer(t *testing.T) {
 		},
 	}
 
-	client := &printClient{}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	client := &printClient{delay: time.Millisecond * 3}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*1200)
 	defer cancel()
 
-	balancer := newBalancer(ctx, client, &Config{Interval: time.Second, Selector: Selector{}}, refresher)
+	balancer := newBalancer(ctx, client, &Config{Interval: time.Millisecond * 50, Selector: Selector{}}, refresher)
 
 	wait := sync.WaitGroup{}
 	ran := 0
-	errs := make(chan error)
-	go func() {
-		for err := range errs {
-			t.Fatal(err)
-		}
-	}()
-	for j := 4; j < 24; j++ {
-		for i := 0; i < j; i++ {
-			ran++
-			wait.Add(1)
-			go func() {
-				defer wait.Done()
+	ret := make([]int, 1000)
 
+	for j := 7; j < 45; j++ {
+		for i := 0; i < j; i++ {
+			wait.Add(1)
+			go func(n int) {
+				defer wait.Done()
 				req, err := http.NewRequest("GET", "/test", nil)
 				if err != nil {
-					errs <- err
+					t.Fatal(err)
+					ret[n] = 1
 					return
 				}
+
 				res, err := balancer.Do(req)
 				if err != nil {
-					errs <- err
+					if err != ErrBalancerShuttingDown {
+						t.Fatal(err)
+					}
+					ret[n] = 1
 					return
 				}
 
 				defer res.Body.Close()
 				_, err = ioutil.ReadAll(res.Body)
 				if err != nil {
-					errs <- err
+					t.Fatal(err)
+					ret[n] = 1
 					return
 				}
 
-			}()
+				ret[n] = 2
+			}(ran)
+			ran++
 		}
-		time.Sleep(time.Millisecond * 20)
+		time.Sleep(time.Millisecond * 2)
 	}
 
 	wait.Wait()
-	close(errs)
-	t.Logf("completed %d\n", ran)
+
+	completed := 0
+	failed := 0
+	for i := range ret {
+		switch ret[i] {
+		case 1:
+			failed++
+		case 2:
+			completed++
+		}
+
+	}
+
+	t.Logf("ran: %d, completed %d, past deadline: %d\n", ran, completed, failed)
 }

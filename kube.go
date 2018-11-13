@@ -3,6 +3,7 @@ package balancer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -54,9 +55,12 @@ type Selector struct {
 }
 
 type Config struct {
-	Selector Selector
-	Interval time.Duration
+	Selector   Selector
+	Interval   time.Duration
+	MaxWaiting int
 }
+
+const defaultMaxWaiting int = 1024
 
 type Pool struct {
 	refresher Refresher
@@ -197,10 +201,10 @@ func (s *Pool) serve() {
 
 func (s *Pool) poll(ctx context.Context) {
 	ticker := time.NewTicker(s.interval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("closing")
 			s.mu.Lock()
 			close(s.closed)
 			s.isClosed = true
@@ -222,11 +226,15 @@ func New(ctx context.Context, client HTTPClient, config *Config) *Pool {
 }
 
 func newBalancer(ctx context.Context, client HTTPClient, config *Config, refresher Refresher) *Pool {
+	maxWaiting := defaultMaxWaiting
+	if config.MaxWaiting > 0 {
+		maxWaiting = config.MaxWaiting
+	}
 	pool := &Pool{
 		client:    client,
 		interval:  config.Interval,
 		selector:  config.Selector,
-		waiting:   make(chan *pass, 128),
+		waiting:   make(chan *pass, maxWaiting),
 		refresher: refresher,
 		busy:      map[key]struct{}{},
 		closed:    make(chan struct{}),
@@ -264,17 +272,26 @@ func (s *bodyReader) callonclose() {
 	}
 }
 
+var ErrBalancerShuttingDown = errors.New("balancer shutting down")
+var ErrOverfilledWaitBucket = errors.New("overfilled wait bucket")
+
 func (s *Pool) Do(ireq *http.Request) (*http.Response, error) {
 	p := newPass()
 	//TODO: close waiting
-	s.waiting <- p
+
+	select {
+	case s.waiting <- p:
+
+	default:
+		return nil, ErrOverfilledWaitBucket
+	}
 	var pod *target
 
 	select {
 	case pod = <-p.target:
 
 	case <-s.closed:
-		return nil, fmt.Errorf("balancer shutting down")
+		return nil, ErrBalancerShuttingDown
 	}
 
 	path := fmt.Sprintf("http://%s:%d%s", pod.ip, pod.port, ireq.URL.Path)
