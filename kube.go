@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -63,10 +64,12 @@ type Pool struct {
 	interval  time.Duration
 	selector  Selector
 
-	mu      sync.Mutex
-	waiting chan *pass
-	busy    map[key]struct{}
-	targets map[key]*target
+	mu       sync.Mutex
+	waiting  chan *pass
+	busy     map[key]struct{}
+	targets  map[key]*target
+	isClosed bool
+	closed   chan struct{}
 }
 
 type key struct {
@@ -141,7 +144,6 @@ func (s *endpointRefresher) ListEndpoints(namespace, service string) ([]*target,
 }
 
 func (s *Pool) refresh() error {
-	fmt.Println("refresh")
 	endpoints, err := s.refresher.ListEndpoints(s.selector.Namespace, s.selector.Service)
 	if err != nil {
 		return err
@@ -170,21 +172,20 @@ func (s *Pool) avail() (*target, bool) {
 }
 
 func (s *Pool) serve() {
-	fmt.Println("serve")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for {
+		if s.isClosed {
+			return
+		}
 		ta, ok := s.avail()
 		if !ok {
 			return
 		}
 
-		fmt.Println("one avail")
-
 		select {
 		case next := <-s.waiting:
-			fmt.Println("serving to waiter")
 			s.busy[ta.key] = struct{}{}
 			next.target <- ta
 
@@ -199,7 +200,11 @@ func (s *Pool) poll(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("cancel called")
+			fmt.Println("closing")
+			s.mu.Lock()
+			close(s.closed)
+			s.isClosed = true
+			s.mu.Unlock()
 			return
 		case <-ticker.C:
 			s.refresh()
@@ -224,6 +229,7 @@ func newBalancer(ctx context.Context, client HTTPClient, config *Config, refresh
 		waiting:   make(chan *pass, 128),
 		refresher: refresher,
 		busy:      map[key]struct{}{},
+		closed:    make(chan struct{}),
 	}
 
 	go pool.poll(ctx)
@@ -262,19 +268,25 @@ func (s *Pool) Do(ireq *http.Request) (*http.Response, error) {
 	p := newPass()
 	//TODO: close waiting
 	s.waiting <- p
-	fmt.Println("added to waiting")
-	pod := <-p.target
+	var pod *target
 
-	fmt.Println("got pod")
+	select {
+	case pod = <-p.target:
+
+	case <-s.closed:
+		return nil, fmt.Errorf("balancer shutting down")
+	}
 
 	path := fmt.Sprintf("http://%s:%d%s", pod.ip, pod.port, ireq.URL.Path)
-	req, err := http.NewRequest(ireq.Method, path, nil)
-	fmt.Println(req, err)
+	req, err := replacePath(ireq, path)
 	if err != nil {
 		return nil, err
 	}
 
 	res, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
 
 	res.Body = &bodyReader{
 		rc: res.Body,
@@ -287,4 +299,23 @@ func (s *Pool) Do(ireq *http.Request) (*http.Response, error) {
 	}
 
 	return res, err
+}
+
+func replacePath(r *http.Request, path string) (*http.Request, error) {
+	// shallow copy of the struct
+	r2 := new(http.Request)
+	*r2 = *r
+	// deep copy of the Header
+	r2.Header = make(http.Header, len(r.Header))
+	for k, s := range r.Header {
+		r2.Header[k] = append([]string(nil), s...)
+	}
+
+	u, err := url.Parse(path)
+	if err != nil {
+		return nil, err
+	}
+	r2.URL = u
+	r2.Host = u.Host
+	return r2, nil
 }

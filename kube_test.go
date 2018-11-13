@@ -38,7 +38,7 @@ func (rc *readCloser) Close() error { return nil }
 type printClient struct{}
 
 func (s *printClient) Do(req *http.Request) (*http.Response, error) {
-	fmt.Printf("%#v\n", req)
+	fmt.Println(req)
 	time.Sleep(time.Second)
 	return &http.Response{Body: &readCloser{}}, nil
 }
@@ -121,28 +121,32 @@ func TestBalancer(t *testing.T) {
 	balancer := newBalancer(ctx, client, &Config{Interval: time.Second, Selector: Selector{}}, refresher)
 
 	wait := sync.WaitGroup{}
-	wait.Add(10)
-	for i := 0; i < 10; i++ {
-		go func() {
-			fmt.Println("starting...")
-			req, err := http.NewRequest("GET", "/test", nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			res, err := balancer.Do(req)
-			if err != nil {
-				fmt.Println(err)
-				t.Fatal(err)
-			}
+	wait.Add(20)
+	for j := 0; j < 2; j++ {
+		for i := 0; i < 10; i++ {
+			go func() {
+				defer wait.Done()
 
-			defer res.Body.Close()
-			_, err = ioutil.ReadAll(res.Body)
-			if err != nil {
-				t.Fatal(err)
-			}
+				req, err := http.NewRequest("GET", "/test", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				res, err := balancer.Do(req)
+				if err != nil {
+					fmt.Println(err)
+					return
+					//t.Fatal(err)
+				}
 
-			wait.Done()
-		}()
+				defer res.Body.Close()
+				_, err = ioutil.ReadAll(res.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+			}()
+		}
+		time.Sleep(time.Second)
 	}
 
 	wait.Wait()
