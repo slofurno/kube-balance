@@ -2,7 +2,6 @@ package balancer
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -38,8 +37,7 @@ func (rc *readCloser) Close() error { return nil }
 type printClient struct{}
 
 func (s *printClient) Do(req *http.Request) (*http.Response, error) {
-	fmt.Println(req)
-	time.Sleep(time.Second)
+	time.Sleep(time.Millisecond * 24)
 	return &http.Response{Body: &readCloser{}}, nil
 }
 
@@ -121,33 +119,44 @@ func TestBalancer(t *testing.T) {
 	balancer := newBalancer(ctx, client, &Config{Interval: time.Second, Selector: Selector{}}, refresher)
 
 	wait := sync.WaitGroup{}
-	wait.Add(20)
-	for j := 0; j < 2; j++ {
-		for i := 0; i < 10; i++ {
+	ran := 0
+	errs := make(chan error)
+	go func() {
+		for err := range errs {
+			t.Fatal(err)
+		}
+	}()
+	for j := 4; j < 24; j++ {
+		for i := 0; i < j; i++ {
+			ran++
+			wait.Add(1)
 			go func() {
 				defer wait.Done()
 
 				req, err := http.NewRequest("GET", "/test", nil)
 				if err != nil {
-					t.Fatal(err)
+					errs <- err
+					return
 				}
 				res, err := balancer.Do(req)
 				if err != nil {
-					fmt.Println(err)
+					errs <- err
 					return
-					//t.Fatal(err)
 				}
 
 				defer res.Body.Close()
 				_, err = ioutil.ReadAll(res.Body)
 				if err != nil {
-					t.Fatal(err)
+					errs <- err
+					return
 				}
 
 			}()
 		}
-		time.Sleep(time.Second)
+		time.Sleep(time.Millisecond * 20)
 	}
 
 	wait.Wait()
+	close(errs)
+	t.Logf("completed %d\n", ran)
 }
