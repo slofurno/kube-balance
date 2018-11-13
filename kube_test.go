@@ -48,6 +48,11 @@ func TestBalancer(t *testing.T) {
 		endpoints: [][]*target{
 			[]*target{
 				&target{
+					ip:   "1.1.1.0",
+					port: 80,
+					key:  key{name: "zero", uid: "000"},
+				},
+				&target{
 					ip:   "1.1.1.1",
 					port: 80,
 					key:  key{name: "one", uid: "111"},
@@ -82,6 +87,11 @@ func TestBalancer(t *testing.T) {
 			},
 
 			[]*target{
+				&target{
+					ip:   "1.1.1.0",
+					port: 80,
+					key:  key{name: "zero", uid: "000"},
+				},
 				&target{
 					ip:   "1.1.1.2",
 					port: 80,
@@ -111,6 +121,28 @@ func TestBalancer(t *testing.T) {
 					key:  key{name: "three", uid: "222"},
 				},
 			},
+			[]*target{
+				&target{
+					ip:   "1.1.1.0",
+					port: 80,
+					key:  key{name: "zero", uid: "000"},
+				},
+				&target{
+					ip:   "1.1.1.4",
+					port: 80,
+					key:  key{name: "four", uid: "444"},
+				},
+				&target{
+					ip:   "1.1.1.2",
+					port: 80,
+					key:  key{name: "two", uid: "222"},
+				},
+				&target{
+					ip:   "1.1.1.3",
+					port: 80,
+					key:  key{name: "three", uid: "222"},
+				},
+			},
 		},
 	}
 
@@ -118,13 +150,16 @@ func TestBalancer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*1200)
 	defer cancel()
 
-	balancer := newBalancer(ctx, client, &Config{Interval: time.Millisecond * 50, Selector: Selector{}}, refresher)
+	balancer := newBalancer(ctx, client, &Config{Interval: time.Millisecond * 100, Selector: Selector{}}, refresher)
 
 	wait := sync.WaitGroup{}
+	a := 3
+	b := 47
+	torun := ((a + b - 1) * (b - a)) >> 1
+	ret := make([]int, torun)
 	ran := 0
-	ret := make([]int, 1000)
 
-	for j := 7; j < 45; j++ {
+	for j := a; j < b; j++ {
 		for i := 0; i < j; i++ {
 			wait.Add(1)
 			go func(n int) {
@@ -161,6 +196,10 @@ func TestBalancer(t *testing.T) {
 	}
 
 	wait.Wait()
+
+	if ran != torun {
+		t.Errorf("expected %d request, got: %d\n", torun, ran)
+	}
 
 	completed := 0
 	failed := 0
