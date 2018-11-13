@@ -1,4 +1,4 @@
-package kubepool
+package balancer
 
 import (
 	"context"
@@ -58,9 +58,10 @@ type Config struct {
 }
 
 type Pool struct {
-	client   *http.Client
-	interval time.Duration
-	selector Selector
+	refresher Refresher
+	client    HTTPClient
+	interval  time.Duration
+	selector  Selector
 
 	mu      sync.Mutex
 	waiting chan *pass
@@ -89,29 +90,36 @@ func newPass() *pass {
 	}
 }
 
-func (s *Pool) refresh() error {
-	path := fmt.Sprintf("https://kubernetes.default.svc.cluster.local/api/v1/namespaces/%s/endpoints/%s", s.selector.Namespace, s.selector.Service)
-	req := http.NewRequest("GET", path, nil)
+type Refresher interface {
+	ListEndpoints(namespace, service string) ([]*target, error)
+}
+
+type endpointRefresher struct {
+	client HTTPClient
+}
+
+func (s *endpointRefresher) ListEndpoints(namespace, service string) ([]*target, error) {
+	path := fmt.Sprintf("https://kubernetes.default.svc.cluster.local/api/v1/namespaces/%s/endpoints/%s", namespace, service)
+	req, _ := http.NewRequest("GET", path, nil)
 
 	token, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Add("authorization", "Bearer "+string(token))
 
 	res, err := s.client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	defer res.Body.Close()
 	var r *response
 	if err := json.NewDecoder(res.Body).Decode(&r); err != nil {
-		return err
+		return nil, err
 	}
 
-	current := map[key]*target{}
-	s.mu.Lock()
+	var endpoints []*target
 
 	for i := range r.Subsets {
 		for j := range r.Subsets[i].Addresses {
@@ -120,14 +128,30 @@ func (s *Pool) refresh() error {
 				uid:  r.Subsets[i].Addresses[j].TargetRef.UID,
 			}
 
-			current[k] = &target{
+			endpoints = append(endpoints, &target{
 				ip:   r.Subsets[i].Addresses[j].IP,
 				port: r.Subsets[i].Ports[0].Port,
 				key:  k,
-			}
+			})
 		}
 	}
 
+	return endpoints, nil
+
+}
+
+func (s *Pool) refresh() error {
+	endpoints, err := s.refresher.ListEndpoints(s.selector.Namespace, s.selector.Service)
+	if err != nil {
+		return err
+	}
+
+	current := map[key]*target{}
+	for i := range endpoints {
+		current[endpoints[i].key] = endpoints[i]
+	}
+
+	s.mu.Lock()
 	s.targets = current
 	s.mu.Unlock()
 
@@ -165,7 +189,7 @@ func (s *Pool) serve() {
 }
 
 func (s *Pool) poll(ctx context.Context) {
-	ticker := time.NewTicker(pool.interval)
+	ticker := time.NewTicker(s.interval)
 	for {
 		select {
 		case <-ctx.Done():
@@ -176,12 +200,17 @@ func (s *Pool) poll(ctx context.Context) {
 	}
 }
 
-func New(ctx context.Context, client *http.Client, config *Config) *Pool {
+type HTTPClient interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
+func New(ctx context.Context, client HTTPClient, config *Config) *Pool {
 	pool := &Pool{
-		client:   client,
-		interval: config.Interval,
-		selector: config.Selector,
-		waiting:  make(chan struct{}, 128),
+		client:    client,
+		interval:  config.Interval,
+		selector:  config.Selector,
+		waiting:   make(chan *pass, 128),
+		refresher: &endpointRefresher{client: client},
 	}
 
 	go pool.poll(ctx)
@@ -196,12 +225,24 @@ type bodyReader struct {
 }
 
 func (s *bodyReader) Read(p []byte) (int, error) {
-	return s.rc.Read(p)
+	n, err := s.rc.Read(p)
+	if err == io.EOF {
+		s.callonclose()
+	}
+	return n, err
 }
 
 func (s *bodyReader) Close() error {
-	defer s.onclose()
-	return s.Close()
+	err := s.rc.Close()
+	s.callonclose()
+	return err
+}
+
+func (s *bodyReader) callonclose() {
+	if fn := s.onclose; fn != nil {
+		s.onclose = nil
+		fn()
+	}
 }
 
 func (s *Pool) Do(ireq *http.Request) (*http.Response, error) {
@@ -209,10 +250,9 @@ func (s *Pool) Do(ireq *http.Request) (*http.Response, error) {
 	//TODO: close waiting
 	s.waiting <- p
 	pod := <-p.target
-	k := p.target.key
 
 	path := fmt.Sprintf("%s:%d%s", pod.ip, pod.port, ireq.URL.Path)
-	req := http.NewRequest(req.Method, path, nil)
+	req, _ := http.NewRequest(ireq.Method, path, nil)
 	res, err := s.client.Do(req)
 
 	res.Body = &bodyReader{
@@ -220,7 +260,9 @@ func (s *Pool) Do(ireq *http.Request) (*http.Response, error) {
 		onclose: func() {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			delete(s.busy, k)
+			delete(s.busy, pod.key)
 		},
 	}
+
+	return res, err
 }
