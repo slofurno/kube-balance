@@ -291,14 +291,23 @@ func (s *Pool) Do(ireq *http.Request) (*http.Response, error) {
 		return nil, ErrBalancerShuttingDown
 	}
 
+	onerror := func() {
+		s.mu.Lock()
+		delete(s.busy, pod.key)
+		s.mu.Unlock()
+		s.serve()
+	}
+
 	path := fmt.Sprintf("http://%s:%d%s", pod.ip, pod.port, ireq.URL.Path)
 	req, err := replacePath(ireq, path)
 	if err != nil {
+		onerror()
 		return nil, err
 	}
 
 	res, err := s.client.Do(req)
 	if err != nil {
+		onerror()
 		return nil, err
 	}
 
