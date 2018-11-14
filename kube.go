@@ -244,8 +244,6 @@ func newBalancer(ctx context.Context, client HTTPClient, config *Config, refresh
 	return pool
 }
 
-//https://kubernetes.default.svc.cluster.local/api/v1/namespaces/pla-structure/endpoints/pla-structure-worker" -H "authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-
 type bodyReader struct {
 	rc      io.ReadCloser
 	onclose func()
@@ -277,7 +275,6 @@ var ErrOverfilledWaitBucket = errors.New("overfilled wait bucket")
 
 func (s *Pool) Do(ireq *http.Request) (*http.Response, error) {
 	p := newPass()
-	//TODO: close waiting
 
 	select {
 	case s.waiting <- p:
