@@ -79,6 +79,15 @@ type Pool struct {
 	closed   chan struct{}
 }
 
+func (s *Pool) Stat() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for k, target := range s.targets {
+		fmt.Printf("%s %s:%d\n", k.name, target.ip, target.port)
+	}
+}
+
 type key struct {
 	name string
 	uid  string
