@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-balance-consumer
+spec:
+  containers:
+  - name: kube-balance-consumer
+    image: slofurno/kube-balance-test-consumer

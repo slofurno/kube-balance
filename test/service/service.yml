@@ -1,0 +1,11 @@
+kind: Service
+apiVersion: v1
+metadata:
+  name: kube-balance
+spec:
+  selector:
+    app: kube-balance-test-service
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 3007

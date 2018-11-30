@@ -1,0 +1,17 @@
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: kube-balance-test-service
+spec:
+  replicas: 5
+  revisionHistoryLimit: 1
+  template:
+    metadata:
+      labels:
+        app: kube-balance-test-service
+    spec:
+      containers:
+      - name: test-svc
+        image: slofurno/kube-balance-test-service
+        ports:
+        - containerPort: 80
