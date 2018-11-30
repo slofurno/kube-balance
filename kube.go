@@ -233,15 +233,19 @@ type HTTPClient interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
-func New(ctx context.Context, config *Config) *Pool {
+type kubeClient struct {
+	client *http.Client
+}
+
+func New() (*kubeClient, error) {
 	cert, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
 	if err != nil {
-		return nil
+		return nil, err
 	}
 
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(cert) {
-		return nil
+		return nil, fmt.Errorf("error appending cert to pool")
 	}
 
 	client := &http.Client{
@@ -263,7 +267,11 @@ func New(ctx context.Context, config *Config) *Pool {
 		},
 	}
 
-	return newBalancer(ctx, client, config, &endpointRefresher{client: client})
+	return &kubeClient{client: client}, nil
+}
+
+func (s *kubeClient) Pool(ctx context.Context, config *Config) *Pool {
+	return newBalancer(ctx, s.client, config, &endpointRefresher{client: s.client})
 }
 
 func newBalancer(ctx context.Context, client HTTPClient, config *Config, refresher Refresher) *Pool {
