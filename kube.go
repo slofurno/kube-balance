@@ -63,7 +63,7 @@ type Config struct {
 	MaxWaiting int
 }
 
-const defaultMaxWaiting int = 1024
+const defaultMaxWaiting int = 1024 * 2
 
 type Pool struct {
 	refresher Refresher
@@ -71,12 +71,11 @@ type Pool struct {
 	interval  time.Duration
 	selector  Selector
 
-	mu       sync.Mutex
-	waiting  chan *pass
-	busy     map[key]struct{}
-	targets  map[key]*target
-	isClosed bool
-	closed   chan struct{}
+	mu      sync.Mutex
+	waiting chan *pass
+	ready   chan key
+	targets map[key]*target
+	closed  chan struct{}
 }
 
 func (s *Pool) Stat() {
@@ -166,52 +165,56 @@ func (s *Pool) refresh() error {
 	}
 
 	current := map[key]*target{}
+	var toready []key
+	s.mu.Lock()
 	for i := range endpoints {
-		current[endpoints[i].key] = endpoints[i]
+		key := endpoints[i].key
+		current[key] = endpoints[i]
+		if _, ok := s.targets[key]; !ok {
+			toready = append(toready, key)
+		}
 	}
 
-	s.mu.Lock()
 	s.targets = current
 	s.mu.Unlock()
+
+	for i := range toready {
+		s.ready <- toready[i]
+	}
 
 	return nil
 }
 
-func (s *Pool) avail() (*target, bool) {
-	for k, v := range s.targets {
-		if _, ok := s.busy[k]; !ok {
-			return v, true
-		}
-	}
+func (s *Pool) avail() *target {
+	for {
+		key := <-s.ready
+		s.mu.Lock()
 
-	return nil, false
+		target, ok := s.targets[key]
+		if !ok {
+			s.mu.Unlock()
+			continue
+		}
+
+		s.mu.Unlock()
+		return target
+	}
 }
 
-func (s *Pool) serve() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+func (s *Pool) serve(ctx context.Context) {
 	for {
-		if s.isClosed {
-			return
-		}
-		ta, ok := s.avail()
-		if !ok {
-			return
-		}
-
 		select {
-		case next := <-s.waiting:
-			s.busy[ta.key] = struct{}{}
-			next.target <- ta
-
-		default:
+		case <-ctx.Done():
 			return
+		case next := <-s.waiting:
+			ta := s.avail()
+			next.target <- ta
 		}
 	}
 }
 
 func (s *Pool) poll(ctx context.Context) {
+	s.refresh()
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 	for {
@@ -219,12 +222,10 @@ func (s *Pool) poll(ctx context.Context) {
 		case <-ctx.Done():
 			s.mu.Lock()
 			close(s.closed)
-			s.isClosed = true
 			s.mu.Unlock()
 			return
 		case <-ticker.C:
 			s.refresh()
-			s.serve()
 		}
 	}
 }
@@ -284,12 +285,13 @@ func newBalancer(ctx context.Context, client HTTPClient, config *Config, refresh
 		interval:  config.Interval,
 		selector:  config.Selector,
 		waiting:   make(chan *pass, maxWaiting),
+		ready:     make(chan key, 32),
 		refresher: refresher,
-		busy:      map[key]struct{}{},
 		closed:    make(chan struct{}),
 	}
 
 	go pool.poll(ctx)
+	go pool.serve(ctx)
 	return pool
 }
 
@@ -340,12 +342,7 @@ func (s *Pool) Do(ireq *http.Request) (*http.Response, error) {
 		return nil, ErrBalancerShuttingDown
 	}
 
-	onerror := func() {
-		s.mu.Lock()
-		delete(s.busy, pod.key)
-		s.mu.Unlock()
-		s.serve()
-	}
+	onerror := func() { s.ready <- pod.key }
 
 	path := fmt.Sprintf("http://%s:%d%s", pod.ip, pod.port, ireq.URL.Path)
 	req, err := replacePath(ireq, path)
@@ -361,13 +358,8 @@ func (s *Pool) Do(ireq *http.Request) (*http.Response, error) {
 	}
 
 	res.Body = &bodyReader{
-		rc: res.Body,
-		onclose: func() {
-			s.mu.Lock()
-			delete(s.busy, pod.key)
-			s.mu.Unlock()
-			s.serve()
-		},
+		rc:      res.Body,
+		onclose: func() { s.ready <- pod.key },
 	}
 
 	return res, err
