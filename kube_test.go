@@ -5,6 +5,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -26,10 +27,12 @@ func (s *podRefresher) ListEndpoints(namespace, service string) ([]*target, erro
 	return ret, nil
 }
 
-type readCloser struct{}
+type readCloser struct {
+	reader io.Reader
+}
 
 func (rc *readCloser) Read(p []byte) (int, error) {
-	return 0, io.EOF
+	return rc.reader.Read(p)
 }
 
 func (rc *readCloser) Close() error { return nil }
@@ -40,7 +43,7 @@ type printClient struct {
 
 func (s *printClient) Do(req *http.Request) (*http.Response, error) {
 	time.Sleep(s.delay)
-	return &http.Response{Body: &readCloser{}}, nil
+	return &http.Response{Body: &readCloser{reader: strings.NewReader(req.URL.Host)}}, nil
 }
 
 func TestBalancer(t *testing.T) {
@@ -156,6 +159,7 @@ func TestBalancer(t *testing.T) {
 	a := 3
 	b := 47
 	torun := ((a + b - 1) * (b - a)) >> 1
+	hosts := make([]string, torun)
 	ret := make([]int, torun)
 	ran := 0
 
@@ -181,13 +185,14 @@ func TestBalancer(t *testing.T) {
 				}
 
 				defer res.Body.Close()
-				_, err = ioutil.ReadAll(res.Body)
+				body, err := ioutil.ReadAll(res.Body)
 				if err != nil {
 					t.Fatal(err)
 					ret[n] = 1
 					return
 				}
 
+				hosts[n] = string(body)
 				ret[n] = 2
 			}(ran)
 			ran++
@@ -213,5 +218,15 @@ func TestBalancer(t *testing.T) {
 
 	}
 
+	hostcount := map[string]int{}
+	for i := range hosts {
+		hostcount[hosts[i]] = hostcount[hosts[i]] + 1
+	}
+
 	t.Logf("ran: %d, completed %d, past deadline: %d\n", ran, completed, failed)
+
+	for host, count := range hostcount {
+		t.Logf("%s: %d\n", host, count)
+	}
+
 }
