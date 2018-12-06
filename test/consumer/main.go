@@ -3,12 +3,36 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/Getsidecar/kube-balance"
+	balancer "github.com/Getsidecar/kube-balancer"
 	"io/ioutil"
 	"net/http"
 	"sync"
 	"time"
 )
+
+func consume(pool *balancer.Pool) ([]byte, error) {
+	var err error
+	var res *http.Response
+	for i := 0; i < 3; i++ {
+		req, _ := http.NewRequest("GET", "/", nil)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
+		req = req.WithContext(ctx)
+		res, err = pool.Do(req)
+		cancel()
+
+		if err == nil {
+			b, err := ioutil.ReadAll(res.Body)
+			res.Body.Close()
+			return b, err
+		}
+
+		if res != nil && res.Body != nil {
+			res.Body.Close()
+		}
+	}
+
+	return nil, err
+}
 
 func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -18,7 +42,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	pool := root.Pool(ctx, &balancer.Config{Interval: time.Second * 5, Selector: balancer.Selector{Namespace: "default", Service: "kube-balance"}})
+	pool := root.Pool(ctx, &balancer.Config{Interval: time.Second * 1, Selector: balancer.Selector{Namespace: "default", Service: "kube-balance"}})
 
 	responses := make([]string, 10*100)
 	wg := &sync.WaitGroup{}
@@ -28,13 +52,10 @@ func main() {
 
 		go func(j int) {
 			for i := 0; i < 100; i++ {
-				req, _ := http.NewRequest("GET", "/", nil)
-				res, err := pool.Do(req)
+				b, err := consume(pool)
 				if err != nil {
 					panic(err)
 				}
-
-				b, err := ioutil.ReadAll(res.Body)
 				responses[j*100+i] = string(b)
 			}
 
@@ -46,4 +67,6 @@ func main() {
 	for i := range responses {
 		fmt.Println(responses[i])
 	}
+
+	time.Sleep(time.Minute)
 }

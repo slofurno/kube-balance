@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,7 +19,14 @@ type Handler struct {
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	v := atomic.AddUint64(&h.handled, 1)
-	time.Sleep(time.Millisecond * 5)
+	a := rand.Intn(50)
+
+	if a == 0 {
+		time.Sleep(time.Second * 10)
+	} else {
+		time.Sleep(time.Millisecond * 5)
+	}
+
 	fmt.Fprintf(w, "%s request: %d", h.hostname, v)
 }
 
